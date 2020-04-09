@@ -39,36 +39,49 @@ while(True):
     color_mask_b = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
     color_mask_b = cv2.medianBlur(color_mask_b, 11)
     masked_b = cv2.bitwise_and(live, color_mask_b)
-    masked_and = cv2.bitwise_and(live, color_mask_b)
 
     # green
     thresh = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
     color_mask_g = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
     color_mask_g = cv2.medianBlur(color_mask_g, 11)
     masked_g = cv2.bitwise_and(live, color_mask_g)
-    masked_and = cv2.bitwise_and(masked_and, color_mask_g)
 
     # red
     thresh = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
     color_mask_r = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
     color_mask_r = cv2.medianBlur(color_mask_r, 11)
     masked_r = cv2.bitwise_and(live, color_mask_r)
-    masked_and = cv2.bitwise_and(masked_and, color_mask_r)
 
     mask_or = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
     masked_or = cv2.bitwise_and(live, mask_or)
 
+    # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
+    contours,hierarchy = cv2.findContours(cv2.cvtColor(mask_or, cv2.COLOR_BGR2GRAY).copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    largest_contour = None
+    area = 0
+    for cnt in contours:
+        #print(cv2.moments(cnt))
+        if cv2.contourArea(cnt) > area:
+            largest_contour = cnt
+            area = cv2.contourArea(cnt)
+
+    hull = cv2.convexHull(largest_contour)
+
+    img = np.zeros(base.shape[:2], dtype=np.uint8)
+    # https://stackoverflow.com/a/50022122
+    img = cv2.drawContours(img, [largest_contour], -1, 255, -1)
+
+    masked_contour = cv2.bitwise_and(live, live, mask=img)
+
+
     # Display the resulting frame
-    cv2.imshow('base', base)
-    cv2.imshow('base blur', base_blur)
-    cv2.imshow('live', live)
-    cv2.imshow('live blur', live_blur)
-    #cv2.imshow('diff', thresh)
-    cv2.imshow('masked and', masked_and)
-    cv2.imshow('masked or', masked_or)
-    cv2.imshow('masked blue', masked_b)
-    cv2.imshow('masked green', masked_g)
-    cv2.imshow('masked red', masked_r)
+    #cv2.imshow('base', base)
+    #cv2.imshow('base blur', base_blur)
+    #cv2.imshow('live', live)
+    #cv2.imshow('live blur', live_blur)
+    #cv2.imshow('contour mask', img)
+    #cv2.imshow('masked or', masked_or)
+    cv2.imshow('masked contour', masked_contour)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
     now = datetime.now(timezone.utc)
