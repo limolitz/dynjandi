@@ -8,10 +8,10 @@ from datetime import datetime, timezone, timedelta
 import time
 import numpy as np
 
-speed = timedelta(milliseconds=33)
+speed = timedelta(milliseconds=15)
 
 # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(3)
 
 kernel = np.ones((5,5),np.float32)/25
 # read base image
@@ -81,13 +81,16 @@ while(True):
     #cv2.imshow('live blur', live_blur)
     #cv2.imshow('contour mask', img)
     #cv2.imshow('masked or', masked_or)
-    cv2.imshow('masked contour', masked_contour)
+    #cv2.imshow('masked contour', masked_contour)
+    cv2.imwrite("contour.png", img)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
+
     now = datetime.now(timezone.utc)
     timediff = now - start
     to_wait = speed - timediff
     if to_wait > timedelta(seconds=0):
+        print(f"Sleeping {to_wait.total_seconds()*1000:.0f} ms.")
         time.sleep(to_wait.total_seconds())
 
 cap.release()
