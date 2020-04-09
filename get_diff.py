@@ -8,29 +8,26 @@ from datetime import datetime, timezone, timedelta
 import time
 import numpy as np
 import subprocess as sp
-from threading import Thread
+from threading import Thread, Event
 from queue import Queue
 # based on
 # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
 
-SPEED = timedelta(milliseconds=15)
-MASK_SPEED = timedelta(milliseconds=1000)
-
-kernel = np.ones((5,5),np.float32)/25
 # read base image
 base = cv2.imread('base.png',-1)
+small_size = (426, 240)
+base_small = cv2.resize(base, small_size)
 
 green = np.zeros(base.shape, np.uint8)
 # Fill image with red color(set each pixel to red)
 green[:] = (0, 255, 0)
 
-#fvs = FileVideoStream(4).start()
 cap = cv2.VideoCapture()
 cap.open(3, apiPreference=cv2.CAP_V4L2)
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
 cap.set(cv2.CAP_PROP_FPS, 30.0)
-last_mask_run = datetime.now(timezone.utc)
-contour = None
+
+contour_mask = None
 
 # https://answers.opencv.org/question/92450/processing-camera-stream-in-opencv-pushing-it-over-rtmp-nginx-rtmp-module-using-ffmpeg/
 # ffmpeg -f rawvideo -vcodec rawvideo -i - f v4l2 -vcodec rawvideo /dev/video5
@@ -49,21 +46,22 @@ proc = sp.Popen(command, stdin=sp.PIPE,stderr=sp.PIPE,shell=False)
 
 
 class WorkerThread(Thread):
-   def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
        super().__init__(*args, **kwargs)
        self.queue = Queue()
        self.result = None
+       self.stoprequest = Event()
 
-   def run(self):
-       while True:
+    def run(self):
+        while not self.stoprequest.isSet():
             # Wait for next message
-            message = self.queue.get()
+            base, live = self.queue.get()
 
             start = datetime.now(timezone.utc)
 
             # compare images
             # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
-            (score, diff) = structural_similarity(message[0], message[1], full=True, multichannel=True)
+            (score, diff) = structural_similarity(base, live, full=True, multichannel=True)
             diff = (diff * 255).astype("uint8")
             ssim_time = datetime.now(timezone.utc)
 
@@ -102,12 +100,13 @@ class WorkerThread(Thread):
 
             #hull = cv2.convexHull(largest_contour)
 
-            contour = green.copy()
-            contour_mask = np.zeros(base.shape[:2], np.uint8)
+            contour = np.zeros(base.shape, np.uint8)
+            contour[:] = (0, 255, 0)
+
+            contour_mask = np.zeros(base.shape, np.uint8)
 
             # https://stackoverflow.com/a/50022122
-            contour = cv2.drawContours(contour, [largest_contour], -1, (255, 255, 255), -1)
-            contour_mask = cv2.drawContours(contour_mask, [largest_contour], -1, 255, -1)
+            contour_mask = cv2.drawContours(contour_mask, [largest_contour], -1, (255, 255, 255), -1)
 
             # Display the resulting frame
             #cv2.imshow('base', base)
@@ -116,9 +115,7 @@ class WorkerThread(Thread):
             #cv2.imshow('contour mask', img)
             #cv2.imshow('masked or', masked_or)
             #cv2.imshow('masked contour', masked_contour)
-            cv2.imwrite("contour.png", contour)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            #cv2.imwrite("contour.png", contour)
 
             now = datetime.now(timezone.utc)
             timediff = now - start
@@ -130,10 +127,16 @@ class WorkerThread(Thread):
                 f"the rest {rest.total_seconds()*1000:.0f}."
             )
 
-            self.result = (contour, contour_mask)
+            contour_mask_big = cv2.resize(contour_mask, (1280, 720))
+            contour_mask_big = cv2.medianBlur(contour_mask_big, 41)
+            self.result = contour_mask_big
 
-   def put_message(self, message):
+    def put_message(self, message):
        self.queue.put(message)
+
+    def join(self, timeout=None):
+        self.stoprequest.set()
+        super().join(timeout)
 
 
 worker_thread = WorkerThread()
@@ -146,18 +149,33 @@ while(True):
     ret, live = cap.read()
 
     if worker_thread.result is not None:
-        contour, contour_mask = worker_thread.result
+        contour_mask = worker_thread.result
         worker_thread.result = None
-        worker_thread.put_message((live, base))
-    if contour is not None:
-        masked_contour = cv2.bitwise_and(live, contour, mask=contour_mask)
-        #cv2.imshow('masked contour', masked_contour)
-        #if cv2.waitKey(1) & 0xFF == ord('q'):
-        #    break
+        live_small = cv2.resize(live, small_size)
+        worker_thread.put_message((live_small, base_small))
+    if contour_mask is not None:
+        # https://www.learnopencv.com/alpha-blending-using-opencv-cpp-python/
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        proc.stdin.write(masked_contour.tostring())
+        # Convert uint8 to float
+        foreground = live.astype(float)
+        background = green.astype(float)
 
+        # Normalize the alpha mask to keep intensity between 0 and 1
+        alpha = contour_mask.astype(float)/255
+
+        # Multiply the foreground with the alpha matte
+        foreground = cv2.multiply(alpha, foreground)
+
+        # Multiply the background with ( 1 - alpha )
+        background = cv2.multiply(1.0 - alpha, background)
+
+        # Add the masked foreground and background.
+        outImage = cv2.add(foreground, background).astype('uint8')
+
+        proc.stdin.write(outImage.tostring())
+
+worker_thread.join()
 cap.release()
 cv2.destroyAllWindows()
-
-
