@@ -70,97 +70,85 @@ class ImageCompareThread(ThreadWithSettingsAndMessages):
             'use_hull': False,
             'use_and': False,
         }
+        self.base = cv2.imread('base.png', -1)
+        self.base_small = cv2.resize(self.base, SMALL_SIZE)
 
     def run(self):
-        # read base image
-        base = cv2.imread('base.png', -1)
-        base_small = cv2.resize(base, SMALL_SIZE)
 
         while not self.stoprequest.isSet():
             # Wait for next message
             live = self.work_queue.get()
-            live_small = cv2.resize(live, SMALL_SIZE)
+            self.result = self.compare_to_background(live)
 
-            start = datetime.now(utc)
-
-            # compare images
-            # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
-            # TODO: this takes to the most of the processing time, make more efficient
-            (score, diff) = structural_similarity(base_small, live_small, full=True, multichannel=True)
-            diff = (diff * 255).astype("uint8")
-            ssim_time = datetime.now(utc)
-
-            b, g, r = cv2.split(diff)
-
-            # blue
-            thresh = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-            color_mask_b = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-
-            # green
-            thresh = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-            color_mask_g = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-
-            # red
-            thresh = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-            color_mask_r = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-
-            mask = None
-            if self.settings['use_and']:
-                mask = cv2.bitwise_and(color_mask_b, color_mask_g, color_mask_r)
-            else:
-                mask = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
-
-            # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
-            contours, hierarchy = cv2.findContours(
-                cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).copy(),
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-            largest_contour = None
-            area = 0
-            for cnt in contours:
-                if cv2.contourArea(cnt) > area:
-                    largest_contour = cnt
-                    area = cv2.contourArea(cnt)
-
-            contour = None
-            if self.settings['use_hull'] is True:
-                contour = cv2.convexHull(largest_contour)
-            else:
-                contour = largest_contour
-
-            contour_mask = np.zeros(base_small.shape, np.uint8)
-
-            # https://stackoverflow.com/a/50022122
-            contour_mask = cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), -1)
-
-            # Display the resulting frame
-            #cv2.imshow('base', base)
-            #cv2.imshow('base blur', base_blur)
-            #cv2.imshow('live blur', live_blur)
-            #cv2.imshow('contour mask', img)
-            #cv2.imshow('mask or', mask_or)
-            #cv2.imshow('mask and', mask_and)
-            #cv2.imshow('masked contour', masked_contour)
-            #cv2.imwrite("contour.png", contour)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-            now = datetime.now(utc)
-            timediff = now - start
-            ssim = ssim_time - start
-            rest = now - ssim_time
-            message = (
-                f"SSIM took {ssim.total_seconds()*1000:.0f} ms, "
-                f"the rest {rest.total_seconds()*1000:.0f} ms, "
-                f"total: {timediff.total_seconds()*1000:.0f} ms."
-            )
-            self.message_queue.put(message)
-
-            contour_mask_big = cv2.resize(contour_mask, (1280, 720))
-            contour_mask_big = cv2.medianBlur(contour_mask_big, 41)
-            self.result = contour_mask_big
         cv2.destroyAllWindows()
+
+    def compare_to_background(self, live):
+        start = datetime.now(utc)
+        # compare images
+        live_small = cv2.resize(live, SMALL_SIZE)
+        # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
+        # TODO: this takes to the most of the processing time, make more efficient
+        (score, diff) = structural_similarity(self.base_small, live_small, full=True, multichannel=True)
+        diff = (diff * 255).astype("uint8")
+        ssim_time = datetime.now(utc)
+
+        b, g, r = cv2.split(diff)
+
+        # blue
+        thresh = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        color_mask_b = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+        # green
+        thresh = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        color_mask_g = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+        # red
+        thresh = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        color_mask_r = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+        mask = None
+        if self.settings['use_and']:
+            mask = cv2.bitwise_and(color_mask_b, color_mask_g, color_mask_r)
+        else:
+            mask = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
+
+        # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
+        contours, hierarchy = cv2.findContours(
+            cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).copy(),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        largest_contour = None
+        area = 0
+        for cnt in contours:
+            if cv2.contourArea(cnt) > area:
+                largest_contour = cnt
+                area = cv2.contourArea(cnt)
+
+        contour = None
+        if self.settings['use_hull'] is True:
+            contour = cv2.convexHull(largest_contour)
+        else:
+            contour = largest_contour
+
+        contour_mask = np.zeros(self.base_small.shape, np.uint8)
+
+        # https://stackoverflow.com/a/50022122
+        contour_mask = cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), -1)
+
+        now = datetime.now(utc)
+        timediff = now - start
+        ssim = ssim_time - start
+        rest = now - ssim_time
+        message = (
+            f"SSIM took {ssim.total_seconds()*1000:.0f} ms, "
+            f"the rest {rest.total_seconds()*1000:.0f} ms, "
+            f"total: {timediff.total_seconds()*1000:.0f} ms."
+        )
+        self.message_queue.put(message)
+
+        contour_mask_big = cv2.resize(contour_mask, (1280, 720))
+        return cv2.medianBlur(contour_mask_big, 41)
 
     def put_work(self, message):
         self.work_queue.put(message)
