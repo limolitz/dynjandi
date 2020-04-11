@@ -19,7 +19,7 @@ This tool processes webcam input to allow for effects, mainly background masking
 ## Possible future features
 
 * Better masking
-  * A machine learning approach seems to work better, but I'm not touching NodeJS with a ten-foot pole [1](https://elder.dev/posts/open-source-virtual-background/)
+  * A machine learning approach seems to work better, but I'm not touching NodeJS with a ten-foot pole [[1]](https://elder.dev/posts/open-source-virtual-background/)
 
 ## Naming
 
