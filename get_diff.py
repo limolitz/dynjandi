@@ -5,6 +5,7 @@ import os
 import argparse
 import cv2
 from skimage.metrics import structural_similarity
+from skimage import img_as_ubyte
 from datetime import datetime, timedelta, timezone
 import time
 import numpy as np
@@ -12,6 +13,7 @@ import subprocess as sp
 from threading import Thread, Event
 from queue import Queue
 import curses
+from keras.models import load_model
 
 FULL_WIDTH = 1280
 FULL_HEIGHT = 720
@@ -69,23 +71,95 @@ class ImageCompareThread(ThreadWithSettingsAndMessages):
         self.settings = {
             'use_hull': False,
             'use_and': False,
+            'use_model': True,
         }
         self.base = cv2.imread('base.png', -1)
         self.base_small = cv2.resize(self.base, SMALL_SIZE)
 
     def run(self):
-
+        # get model here
+        # https://github.com/anilsathyan7/Portrait-Segmentation
+        model = load_model('deconv_bnoptimized_munet.h5', compile=False)
         while not self.stoprequest.isSet():
-            # Wait for next message
             live = self.work_queue.get()
-            self.result = self.compare_to_background(live)
+            mask = None
+            if self.get_setting('use_model'):
+                mask = self.infer_from_model(live, model)
+            else:
+                mask = self.compare_to_background(live)
 
-        cv2.destroyAllWindows()
+            # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
+            contours, hierarchy = cv2.findContours(
+                mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            largest_contour = None
+            area = 0
+            for cnt in contours:
+                if cv2.contourArea(cnt) > area:
+                    largest_contour = cnt
+                    area = cv2.contourArea(cnt)
+
+            contour = None
+            if self.settings['use_hull'] is True:
+                contour = cv2.convexHull(largest_contour)
+            else:
+                contour = largest_contour
+
+            contour_mask = np.zeros(self.base_small.shape, np.uint8)
+
+            # https://stackoverflow.com/a/50022122
+            contour_mask = cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), -1)
+            contour_mask_big = cv2.resize(contour_mask, (FULL_WIDTH, FULL_HEIGHT))
+            contour_blur = cv2.medianBlur(contour_mask_big, 21)
+
+            self.result = contour_blur
+
+    def infer_from_model(self, live, model):
+        # based on
+        # https://news.ycombinator.com/item?id=22842823
+        try:
+            start = datetime.now(utc)
+
+            frame = cv2.cvtColor(live, cv2.COLOR_BGR2RGB)
+            simg = cv2.resize(frame, (128, 128), interpolation=cv2.INTER_AREA)
+            simg = simg.reshape((1, 128, 128, 3)) / 255.0
+
+            preprocessing = datetime.now(utc)
+
+            out = model.predict(simg)
+            predicting = datetime.now(utc)
+
+            mask = out.reshape((128, 128, 1))
+            mask = img_as_ubyte(mask)
+            mask = cv2.resize(mask, SMALL_SIZE)
+
+            postprocessing = datetime.now(utc)
+
+            preprocessing_diff = preprocessing - start
+            predicting_diff = predicting - preprocessing
+            postprocessing_diff = postprocessing - predicting
+            total_diff = postprocessing - start
+
+            message = (
+                f"Preprocessing took {preprocessing_diff.total_seconds()*1000:.0f} ms, "
+                f"Predicting took {predicting_diff.total_seconds()*1000:.0f} ms, "
+                f"Postprocessing took {postprocessing_diff.total_seconds()*1000:.0f} ms, "
+                f"total: {total_diff.total_seconds()*1000:.0f} ms."
+            )
+            self.message_queue.put(message)
+            return mask
+        except Exception as e:
+            message = str(e)
+            self.message_queue.put(f"Error on model: {message}")
+            return None
 
     def compare_to_background(self, live):
-        start = datetime.now(utc)
         # compare images
+        start = datetime.now(utc)
         live_small = cv2.resize(live, SMALL_SIZE)
+        preprocessing = datetime.now(utc)
         # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
         # TODO: this takes to the most of the processing time, make more efficient
         (score, diff) = structural_similarity(self.base_small, live_small, full=True, multichannel=True)
@@ -94,17 +168,9 @@ class ImageCompareThread(ThreadWithSettingsAndMessages):
 
         b, g, r = cv2.split(diff)
 
-        # blue
-        thresh = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        color_mask_b = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-
-        # green
-        thresh = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        color_mask_g = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-
-        # red
-        thresh = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-        color_mask_r = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+        color_mask_b = cv2.threshold(b, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        color_mask_g = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+        color_mask_r = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
 
         mask = None
         if self.settings['use_and']:
@@ -112,43 +178,19 @@ class ImageCompareThread(ThreadWithSettingsAndMessages):
         else:
             mask = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
 
-        # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
-        contours, hierarchy = cv2.findContours(
-            cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).copy(),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        largest_contour = None
-        area = 0
-        for cnt in contours:
-            if cv2.contourArea(cnt) > area:
-                largest_contour = cnt
-                area = cv2.contourArea(cnt)
-
-        contour = None
-        if self.settings['use_hull'] is True:
-            contour = cv2.convexHull(largest_contour)
-        else:
-            contour = largest_contour
-
-        contour_mask = np.zeros(self.base_small.shape, np.uint8)
-
-        # https://stackoverflow.com/a/50022122
-        contour_mask = cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), -1)
-
         now = datetime.now(utc)
-        timediff = now - start
+        preprocessing_diff = preprocessing - start
         ssim = ssim_time - start
-        rest = now - ssim_time
+        postprocessing_diff = now - ssim_time
+        total_diff = now - start
         message = (
+            f"Preprocessing took {preprocessing_diff.total_seconds()*1000:.0f} ms, "
             f"SSIM took {ssim.total_seconds()*1000:.0f} ms, "
-            f"the rest {rest.total_seconds()*1000:.0f} ms, "
-            f"total: {timediff.total_seconds()*1000:.0f} ms."
+            f"Postprocessing took {postprocessing_diff.total_seconds()*1000:.0f} ms, "
+            f"total: {total_diff.total_seconds()*1000:.0f} ms."
         )
         self.message_queue.put(message)
-
-        contour_mask_big = cv2.resize(contour_mask, (1280, 720))
-        return cv2.medianBlur(contour_mask_big, 41)
+        return mask
 
     def put_work(self, message):
         self.work_queue.put(message)
@@ -286,6 +328,12 @@ def handle_input(
     green_win.addstr(2, 2, "(G)reen active")
     green_win.refresh()
 
+    model_win = curses.newwin(5, 20, 0, 60)
+    model_win.bkgd(curses.color_pair(2))
+    model_win.box()
+    model_win.addstr(2, 2, "(M)odel used")
+    model_win.refresh()
+
     win3 = curses.newwin(5, 20, 0, 100)
     win3.bkgd(curses.color_pair(2))
     win3.box()
@@ -340,11 +388,19 @@ def handle_input(
             if masking_thread.toggle_setting('use_green'):
                 green_win.addstr(2, 2, "(G)reen active")
             else:
-                green_win.addstr(2, 2, "(G)reen inctive")
+                green_win.addstr(2, 2, "(G)reen inactive")
             green_win.refresh()
-        if key == 'q':
+        elif key == 'm':
+            model_win.clear()
+            model_win.box()
+            if image_compare_thread.toggle_setting('use_model'):
+                model_win.addstr(2, 2, "(M)odel active")
+            else:
+                model_win.addstr(2, 2, "(M)odel inactive")
+            model_win.refresh()
+        elif key == 'q':
             break
-        if key == os.linesep:
+        elif key == os.linesep:
             break
 
         if masking_thread.has_message():
@@ -381,8 +437,6 @@ def handle_input(
             fps_win.addstr(2, 2, f"{frame_count} fps")
             fps_win.refresh()
             last_fps_update = datetime.now(utc)
-
-        stdscr.refresh()
 
 
 def main(argv=None):
