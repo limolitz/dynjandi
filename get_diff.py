@@ -151,9 +151,9 @@ class ImageCompareThread(ThreadWithSettingsAndMessages):
             ssim = ssim_time - start
             rest = now - ssim_time
             message = (
-                f"Processing took {timediff.total_seconds()*1000:.0f} ms, "
-                f"ssim {ssim.total_seconds()*1000:.0f} ms, "
-                f"the rest {rest.total_seconds()*1000:.0f} ms."
+                f"SSIM took {ssim.total_seconds()*1000:.0f} ms, "
+                f"the rest {rest.total_seconds()*1000:.0f} ms, "
+                f"total: {timediff.total_seconds()*1000:.0f} ms."
             )
             self.message_queue.put(message)
 
@@ -251,8 +251,8 @@ class MaskingThread(ThreadWithSettingsAndMessages):
                 total_diff = writing - start
                 message = (
                     f"Reading took {reading_diff.total_seconds()*1000:.0f} ms, "
-                    f"Masking took {masking_diff.total_seconds()*1000:.0f} ms, "
-                    f"Writing took {writing_diff.total_seconds()*1000:.0f} ms, "
+                    f"masking took {masking_diff.total_seconds()*1000:.0f} ms, "
+                    f"writing took {writing_diff.total_seconds()*1000:.0f} ms, "
                     f"total: {total_diff.total_seconds()*1000:.0f} ms."
                 )
                 self.message_queue.put(message)
@@ -360,6 +360,8 @@ def handle_input(
             break
 
         if masking_thread.has_message():
+            masking_message_win.clear()
+            masking_message_win.box()
             masking_message_queue.put(masking_thread.get_message())
             messages = []
             for i in range(0, min(8, masking_message_queue.qsize())):
@@ -371,6 +373,8 @@ def handle_input(
                 masking_message_queue.put(message)
 
         if image_compare_thread.has_message():
+            compare_message_win.clear()
+            compare_message_win.box()
             compare_message_queue.put(image_compare_thread.get_message())
             messages = []
             for i in range(0, min(8, compare_message_queue.qsize())):
