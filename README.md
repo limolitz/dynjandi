@@ -16,10 +16,15 @@ This tool processes webcam input to allow for effects, mainly background masking
 * Run main script `./get_diff.py`
 * Profit! You can further process the image, e.g. with OBS Studio and make yourself float in space!
 
+## Possible future features
+
+* Better masking
+** a machine learning approach seems to work better, but I'm not touching NodeJS with a ten-foot pole [1](https://elder.dev/posts/open-source-virtual-background/)
+
 ## Naming
 
 Dynjandi is named after the Icelandic waterfall of the same name.
 
 ## License
 
-MIT License
+The MIT License, copyright (c) 2020 wasmitnetzen

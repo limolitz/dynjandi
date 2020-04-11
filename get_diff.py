@@ -5,22 +5,21 @@ import os
 import argparse
 import cv2
 from skimage.metrics import structural_similarity
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import numpy as np
 import subprocess as sp
 from threading import Thread, Event
 from queue import Queue
 import curses
-# based on
-# https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
 
 FULL_WIDTH = 1280
 FULL_HEIGHT = 720
 SMALL_SIZE = (426, 240)
 
+utc = timezone.utc
+
 # https://answers.opencv.org/question/92450/processing-camera-stream-in-opencv-pushing-it-over-rtmp-nginx-rtmp-module-using-ffmpeg/
-# ffmpeg -f rawvideo -vcodec rawvideo -i - f v4l2 -vcodec rawvideo /dev/video5
 FFMPEG_COMMAND = [
     'ffmpeg',
     '-y',
@@ -35,10 +34,11 @@ FFMPEG_COMMAND = [
 ]
 
 
-class ThreadWithSettings(Thread):
+class ThreadWithSettingsAndMessages(Thread):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.settings = {}
+        self.message_queue = Queue()
 
     def set_setting(self, setting, value):
         self.settings[setting] = value
@@ -50,12 +50,20 @@ class ThreadWithSettings(Thread):
         self.settings[setting] = not self.settings[setting]
         return self.settings[setting]
 
+    def has_message(self) -> bool:
+        return self.message_queue.qsize() > 0
 
-class ImageCompareThread(ThreadWithSettings):
+    def get_message(self):
+        # don't block
+        if self.has_message:
+            return self.message_queue.get()
+        return None
+
+
+class ImageCompareThread(ThreadWithSettingsAndMessages):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.work_queue = Queue()
-        self.message_queue = Queue()
         self.result = None
         self.stoprequest = Event()
         self.settings = {
@@ -73,14 +81,14 @@ class ImageCompareThread(ThreadWithSettings):
             live = self.work_queue.get()
             live_small = cv2.resize(live, SMALL_SIZE)
 
-            start = datetime.now(timezone.utc)
+            start = datetime.now(utc)
 
             # compare images
             # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
             # TODO: this takes to the most of the processing time, make more efficient
             (score, diff) = structural_similarity(base_small, live_small, full=True, multichannel=True)
             diff = (diff * 255).astype("uint8")
-            ssim_time = datetime.now(timezone.utc)
+            ssim_time = datetime.now(utc)
 
             b, g, r = cv2.split(diff)
 
@@ -138,14 +146,14 @@ class ImageCompareThread(ThreadWithSettings):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(utc)
             timediff = now - start
             ssim = ssim_time - start
             rest = now - ssim_time
             message = (
                 f"Processing took {timediff.total_seconds()*1000:.0f} ms, "
-                f"ssim {ssim.total_seconds()*1000:.0f}, "
-                f"the rest {rest.total_seconds()*1000:.0f}."
+                f"ssim {ssim.total_seconds()*1000:.0f} ms, "
+                f"the rest {rest.total_seconds()*1000:.0f} ms."
             )
             self.message_queue.put(message)
 
@@ -157,21 +165,12 @@ class ImageCompareThread(ThreadWithSettings):
     def put_work(self, message):
         self.work_queue.put(message)
 
-    def has_message(self) -> bool:
-        return self.message_queue.qsize() > 0
-
-    def get_message(self):
-        # don't block
-        if self.has_message:
-            return self.message_queue.get()
-        return None
-
     def join(self, timeout=None):
         self.stoprequest.set()
         super().join(timeout)
 
 
-class MaskingThread(ThreadWithSettings):
+class MaskingThread(ThreadWithSettingsAndMessages):
     def __init__(self, worker_thread: Thread, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.stoprequest = Event()
@@ -190,12 +189,17 @@ class MaskingThread(ThreadWithSettings):
         green[:] = (0, 255, 0)
         base_blur = cv2.imread('base_blur.png', -1)
 
+        # loosely based on
+        # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
+
         cap = self.cap
+        # try to have higher perf by using V4L2 here
+        # https://stackoverflow.com/a/55779890
         cap.open(0, apiPreference=cv2.CAP_V4L2)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, FULL_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FULL_HEIGHT)
-        cap.set(cv2.CAP_PROP_FPS, 30.0)
+        cap.set(cv2.CAP_PROP_FPS, 30)
 
         proc = sp.Popen(FFMPEG_COMMAND, stdin=sp.PIPE, stderr=sp.PIPE, shell=False)
 
@@ -203,12 +207,15 @@ class MaskingThread(ThreadWithSettings):
         self.worker_thread.put_work(live)
 
         while not self.stoprequest.isSet():
+            start = datetime.now(utc)
             ret, live = cap.read()
+            reading = datetime.now(utc)
 
             if self.worker_thread.result is not None:
                 contour_mask = self.worker_thread.result
                 self.worker_thread.result = None
                 self.worker_thread.put_work(live)
+            # TODO: better wait for first result from other thread
             if contour_mask is not None:
                 # based on
                 # https://www.learnopencv.com/alpha-blending-using-opencv-cpp-python/
@@ -232,8 +239,23 @@ class MaskingThread(ThreadWithSettings):
                 # Add the masked foreground and background.
                 outImage = cv2.add(foreground, background).astype('uint8')
 
+                masking = datetime.now(utc)
+
                 self.frame_count += 1
                 proc.stdin.write(outImage.tostring())
+                writing = datetime.now(utc)
+
+                reading_diff = reading - start
+                masking_diff = masking - reading
+                writing_diff = writing - masking
+                total_diff = writing - start
+                message = (
+                    f"Reading took {reading_diff.total_seconds()*1000:.0f} ms, "
+                    f"Masking took {masking_diff.total_seconds()*1000:.0f} ms, "
+                    f"Writing took {writing_diff.total_seconds()*1000:.0f} ms, "
+                    f"total: {total_diff.total_seconds()*1000:.0f} ms."
+                )
+                self.message_queue.put(message)
         cap.release()
 
     def join(self, timeout=None):
@@ -246,7 +268,9 @@ class MaskingThread(ThreadWithSettings):
         return frame_count
 
 
-def handle_input(stdscr, image_compare_thread: ThreadWithSettings, masking_thread: ThreadWithSettings):
+def handle_input(
+    stdscr, image_compare_thread: ThreadWithSettingsAndMessages, masking_thread: ThreadWithSettingsAndMessages
+):
     curses.start_color()
     curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLUE)
     curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)
@@ -280,19 +304,25 @@ def handle_input(stdscr, image_compare_thread: ThreadWithSettings, masking_threa
     win3.addstr(2, 2, "(Q)uit")
     win3.refresh()
 
-    last_fps_update = datetime.now(timezone.utc)
+    last_fps_update = datetime.now(utc)
 
     fps_win = curses.newwin(5, 20, 5, 00)
     fps_win.bkgd(curses.color_pair(2))
     fps_win.box()
     fps_win.refresh()
 
-    # message window
-    message_win = curses.newwin(10, 120, 10, 0)
-    message_win.bkgd(curses.color_pair(2))
-    message_win.box()
-    message_win.refresh()
-    message_queue = Queue()
+    # message windows
+    masking_message_win = curses.newwin(10, 120, 10, 0)
+    masking_message_win.bkgd(curses.color_pair(2))
+    masking_message_win.box()
+    masking_message_win.refresh()
+    masking_message_queue = Queue()
+
+    compare_message_win = curses.newwin(10, 120, 20, 0)
+    compare_message_win.bkgd(curses.color_pair(2))
+    compare_message_win.box()
+    compare_message_win.refresh()
+    compare_message_queue = Queue()
 
     while True:
         key = ''
@@ -329,25 +359,36 @@ def handle_input(stdscr, image_compare_thread: ThreadWithSettings, masking_threa
         if key == os.linesep:
             break
 
-        if image_compare_thread.has_message():
-            message_queue.put(image_compare_thread.get_message())
+        if masking_thread.has_message():
+            masking_message_queue.put(masking_thread.get_message())
             messages = []
-            for i in range(0, min(8, message_queue.qsize())):
-                message = message_queue.get()
-                message_win.addstr(i + 1, 2, message)
+            for i in range(0, min(8, masking_message_queue.qsize())):
+                message = masking_message_queue.get()
+                masking_message_win.addstr(i + 1, 2, message)
                 messages.append(message)
-            message_win.refresh()
+            masking_message_win.refresh()
             for message in messages:
-                message_queue.put(message)
+                masking_message_queue.put(message)
 
-        if datetime.now(timezone.utc) - last_fps_update > timedelta(seconds=1):
-            # update fps counter
+        if image_compare_thread.has_message():
+            compare_message_queue.put(image_compare_thread.get_message())
+            messages = []
+            for i in range(0, min(8, compare_message_queue.qsize())):
+                message = compare_message_queue.get()
+                compare_message_win.addstr(i + 1, 2, message)
+                messages.append(message)
+            compare_message_win.refresh()
+            for message in messages:
+                compare_message_queue.put(message)
+
+        # update fps counter once per second
+        if datetime.now(utc) - last_fps_update > timedelta(seconds=1):
             frame_count = masking_thread.get_framecount()
             fps_win.clear()
             fps_win.box()
             fps_win.addstr(2, 2, f"{frame_count} fps")
             fps_win.refresh()
-            last_fps_update = datetime.now(timezone.utc)
+            last_fps_update = datetime.now(utc)
 
         stdscr.refresh()
 
