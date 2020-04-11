@@ -5,7 +5,12 @@ import cv2
 from datetime import datetime, timezone, timedelta
 
 # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture()
+cap.open(0, apiPreference=cv2.CAP_V4L2)
+cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FPS, 30.0)
 
 start = datetime.now(timezone.utc)
 
@@ -27,3 +32,6 @@ if cv2.waitKey(1) & 0xFF == ord('q'):
     cv2.destroyAllWindows()
 
 cv2.imwrite("base.png", frame)
+
+base_blur = cv2.medianBlur(frame, 21)
+cv2.imwrite("base_blur.png", base_blur)

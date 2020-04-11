@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import os
 import argparse
 import cv2
 from skimage.metrics import structural_similarity
@@ -10,6 +11,7 @@ import numpy as np
 import subprocess as sp
 from threading import Thread, Event
 from queue import Queue
+import curses
 # based on
 # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_gui/py_video_display/py_video_display.html
 
@@ -39,6 +41,10 @@ class ImageCompareThread(Thread):
         self.queue = Queue()
         self.result = None
         self.stoprequest = Event()
+        self.settings = {
+            'use_hull': False,
+            'use_and': False,
+        }
 
     def run(self):
         # read base image
@@ -54,6 +60,7 @@ class ImageCompareThread(Thread):
 
             # compare images
             # https://www.pyimagesearch.com/2017/06/19/image-difference-with-opencv-and-python/
+            # TODO: this takes to the most of the processing time, make more efficient
             (score, diff) = structural_similarity(base_small, live_small, full=True, multichannel=True)
             diff = (diff * 255).astype("uint8")
             ssim_time = datetime.now(timezone.utc)
@@ -72,29 +79,35 @@ class ImageCompareThread(Thread):
             thresh = cv2.threshold(r, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
             color_mask_r = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
 
-            mask_and = cv2.bitwise_and(color_mask_b, color_mask_g, color_mask_r)
-            mask_or = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
+            mask = None
+            if self.settings['use_and']:
+                mask = cv2.bitwise_and(color_mask_b, color_mask_g, color_mask_r)
+            else:
+                mask = cv2.bitwise_or(color_mask_b, color_mask_g, color_mask_r)
 
             # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_contours/py_contour_features/py_contour_features.html#
             contours, hierarchy = cv2.findContours(
-                cv2.cvtColor(mask_or, cv2.COLOR_BGR2GRAY).copy(),
+                cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY).copy(),
                 cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE
             )
             largest_contour = None
             area = 0
             for cnt in contours:
-                # print(cv2.moments(cnt))
                 if cv2.contourArea(cnt) > area:
                     largest_contour = cnt
                     area = cv2.contourArea(cnt)
 
-            # hull = cv2.convexHull(largest_contour)
+            contour = None
+            if self.settings['use_hull'] is True:
+                contour = cv2.convexHull(largest_contour)
+            else:
+                contour = largest_contour
 
             contour_mask = np.zeros(base_small.shape, np.uint8)
 
             # https://stackoverflow.com/a/50022122
-            contour_mask = cv2.drawContours(contour_mask, [largest_contour], -1, (255, 255, 255), -1)
+            contour_mask = cv2.drawContours(contour_mask, [contour], -1, (255, 255, 255), -1)
 
             # Display the resulting frame
             #cv2.imshow('base', base)
@@ -112,18 +125,31 @@ class ImageCompareThread(Thread):
             timediff = now - start
             ssim = ssim_time - start
             rest = now - ssim_time
+            '''
             print(
                 f"Processing took {timediff.total_seconds()*1000:.0f} ms, "
                 f"ssim {ssim.total_seconds()*1000:.0f}, "
                 f"the rest {rest.total_seconds()*1000:.0f}."
             )
+            '''
 
             contour_mask_big = cv2.resize(contour_mask, (1280, 720))
             contour_mask_big = cv2.medianBlur(contour_mask_big, 41)
             self.result = contour_mask_big
+        cv2.destroyAllWindows()
 
     def put_message(self, message):
         self.queue.put(message)
+
+    def set_setting(self, setting, value):
+        self.settings[setting] = value
+
+    def get_setting(self, setting):
+        return self.settings[setting]
+
+    def toggle_setting(self, setting):
+        self.settings[setting] = not self.settings[setting]
+        return self.settings[setting]
 
     def join(self, timeout=None):
         self.stoprequest.set()
@@ -192,6 +218,59 @@ class MaskingThread(Thread):
         super().join(timeout)
 
 
+def handle_input(stdscr, image_compare_thread: Thread):
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLUE)
+    curses.init_pair(2, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+    stdscr.bkgd(curses.color_pair(1))
+    stdscr.refresh()
+
+    # Hull info
+    win1 = curses.newwin(5, 20, 0, 0)
+    win1.bkgd(curses.color_pair(2))
+    win1.box()
+    win1.addstr(2, 2, "(H)ull inactive")
+    win1.refresh()
+
+    # And/Or info
+    win2 = curses.newwin(5, 20, 0, 20)
+    win2.bkgd(curses.color_pair(2))
+    win2.box()
+    win2.addstr(2, 2, "(A)nd inactive")
+    win2.refresh()
+
+    win3 = curses.newwin(5, 20, 0, 40)
+    win3.bkgd(curses.color_pair(2))
+    win3.box()
+    win3.addstr(2, 2, "(Q)uit")
+    win3.refresh()
+
+    while True:
+        key = str(stdscr.getkey())
+        if key == 'h':
+            win1.clear()
+            win1.box()
+            if image_compare_thread.toggle_setting('use_hull'):
+                win1.addstr(2, 2, "(H)ull active")
+            else:
+                win1.addstr(2, 2, "(H)ull inactive")
+            win1.refresh()
+        elif key == 'a':
+            win2.clear()
+            win2.box()
+            if image_compare_thread.toggle_setting('use_and'):
+                win2.addstr(2, 2, "(A)nd active")
+            else:
+                win2.addstr(2, 2, "(A)nd inactive")
+            win2.refresh()
+        if key == 'q':
+            break
+        if key == os.linesep:
+            break
+
+        stdscr.refresh()
+
+
 def main(argv=None):
     image_compare_thread = ImageCompareThread()
     image_compare_thread.start()
@@ -200,13 +279,11 @@ def main(argv=None):
     masking_thread.start()
 
     try:
-        pass
+        curses.wrapper(handle_input, image_compare_thread)
     except KeyboardInterrupt:
         print("Exiting...")
-        masking_thread.join()
-        image_compare_thread.join()
-
-    cv2.destroyAllWindows()
+    image_compare_thread.join()
+    masking_thread.join()
 
 
 if __name__ == '__main__':
